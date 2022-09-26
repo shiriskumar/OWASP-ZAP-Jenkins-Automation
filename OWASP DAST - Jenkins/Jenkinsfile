@@ -1,0 +1,130 @@
+def scan_type
+	def target
+		pipeline {
+			agent any
+			parameters {
+				choice(name: 'Scan_Type', choices: ['Baseline', 'Full', 'API'], description: 'Select the type of scan')
+
+				choice(name: 'API_Format', choices: ['', 'openapi', 'soap', 'graphql'], description: 'Select the format, if API Scan is selected above.')
+
+				string(name: 'Target_URL', defaultValue: 'http://demo.testfire.net', description: 'Target URL including the protocol, eg https://www.example.com')
+
+				booleanParam(name: 'Enable_Alpha_Rule', defaultValue: true, description: 'Include the alpha active and passive scan rules (-a)')
+
+				string(name: 'Spider_Time', defaultValue: '1', description: 'The number of minutes to spider for (default 1)')
+
+				booleanParam(name: 'Enable_AJAX_Spider', defaultValue: true, description: 'Include the use the Ajax spider (-j)')
+
+				text(name: 'Form_Values', defaultValue: '-config formhandler.fields.field\\(0\\).fieldId=uid -config formhandler.fields.field\\(0\\).value=admin -config formhandler.fields.field\\(0\\).enabled=true -config formhandler.fields.field\\(0\\).fieldId=passw -config formhandler.fields.field\\(0\\).value=admin -config formhandler.fields.field\\(0\\).enabled=true -config formhandler.fields.field\\(0\\).fieldId=listAccounts -config formhandler.fields.field\\(0\\).value=800000 -config formhandler.fields.field\\(0\\).enabled=true', description: 'ZAP command line options. Visit: Specifying Value & Authentication https://www.zaproxy.org/blog/2017-06-19-scanning-apis-with-zap/ or https://www.zaproxy.org/faq/how-do-you-find-out-what-key-to-use-to-set-a-config-value-on-the-command-line/ ')
+			}
+	stages {
+		stage('Pipeline Info') {
+			steps {
+				script {
+					echo "<--Parameter Initialization-->"
+					echo """
+					The current parameters are:
+					Scan Type: ${params.Scan_Type}
+					API Format: ${params.API_Format}
+					Target: ${params.Target_URL}
+					Include Alpha Scan: ${params.Enable_Alpha_Rule}
+					Spider Time: ${params.Spider_Time}
+					Enable AJAX Spider: ${params.Enable_AJAX_Spider}
+					Form Values: ${params.Form_Values}
+					"""
+				}
+			}
+		}
+
+		stage('Setting up OWASP ZAP docker container') {
+			steps {
+				script {
+					echo "Pulling latest OWASP ZAP container --> Start"
+					sh """
+					sudo su
+					sudo aa-remove-unknown
+					docker kill owasp | exit 0
+					docker pull owasp/zap2docker-stable
+					"""
+					echo "Pulling lastest OWASP ZAP container --> End"
+					echo "Starting container --> Start"
+					sh """
+					docker run -dt --name owasp owasp/zap2docker-stable /bin/bash
+					"""
+				}
+			}
+		}
+		
+		stage('Prepare wrk directory') {
+			steps {
+				script {
+					sh """
+					docker exec owasp mkdir /zap/wrk
+					"""
+				}
+			}
+		}
+		
+		stage('DAST Scanning') {
+			steps {
+				script{
+					scan_option = "${params.Scan_Type}"
+					if(scan_option == "Baseline"){scan_script = "zap-baseline.py"}
+					if(scan_option == "Full"){scan_script = "zap-full-scan.py"}
+					if(scan_option == "API"){scan_script = "zap-api-scan.py"}
+					target = "${params.Target_URL}"
+					api_format = "${params.API_Format}"
+					form_values = "${params.Form_Values}"
+					alpha_rule_enable = "${params.Enable_Alpha_Rule}"
+					spider_time = "${params.Spider_Time}"
+					ajax_spider_enable = "${params.Enable_AJAX_Spider}"
+					command = "owasp " + scan_script + " -t " + target + "  -r report.html"
+					if(spider_time ==~ /^[1-9][0-9]{0,1}/) {
+						command = command + " -m " + spider_time
+					} else {
+						echo "Invalid Scanning Time Provided"
+						sh "exit 1"
+					}
+					if(scan_option == "API"){
+						command = command + " -f " + api_format
+					}
+					if(alpha_rule_enable){
+						command = command + " -a "
+					}
+					if(ajax_spider_enable){
+						command = command + " -j "
+					}
+					command = command + ' -z "-addoninstallall '
+					if(form_values){command = command + form_values}
+					command = command + '" -I'
+					sh """
+					#!/bin/bash
+					sudo su
+					docker exec $command
+					"""
+				}
+			}
+		}
+		
+		stage('Copy Report to Workspace'){
+			steps{
+				script{
+					sh """
+					docker cp owasp:/zap/wrk/report.html ${WORKSPACE}/report.html
+					"""
+				}
+			}
+		}
+
+	}
+	post {
+		always {
+			echo "Removing container"
+			sh '''
+			sudo su
+			docker stop owasp
+			docker rm owasp
+			'''
+		}
+	}
+}
